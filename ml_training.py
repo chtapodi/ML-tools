@@ -6,6 +6,7 @@ from torch import optim
 import torchvision.utils
 import matplotlib.pyplot as plts
 from ASAM.asam import ASAM, SAM
+from Discriminative-learning-rates-PyTorch import discriminativeLR as dlr
 
 class custom_warmup :
     #Adapted from yolov5 code
@@ -35,6 +36,7 @@ class trainer :
     def __init(self, model, train_dataset, val_dataset, batch_size=16, val_dataset=None,
     forward_function=None, val_function=None, report_function=None,
     optimizer='SGD', warmup_scheduler=None, warmup_epochs=5, accumulate_batches=1,
+    use_discriminativeLR=False, discriminativeLR=.0001
     scheduler_names=[], scheduler_checkpoints=[]
     SAM=False, ASAM=False, SWA=False, SWALR_epochs=5, SWA_lr=.05
     lr=.01, momentum=0.937, scheduler_period=10,
@@ -47,6 +49,11 @@ class trainer :
 
 
         self.model=model
+
+        if discriminativeLR :
+            params, lr_arr, _ = dlr.discriminative_lr_params(self.model, slice(min_lr, self.lr)) #slice(min_lr,max_lr)
+            for p in params :
+                p['lr']=(float)(p['lr'])
 
         #init dataloaders
         self.train_loader=torch.utils.data.DataLoader(train_dataset)
