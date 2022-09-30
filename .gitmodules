@@ -1,0 +1,3 @@
+[submodule "ASAM"]
+	path = ASAM
+	url = https://github.com/SamsungLabs/ASAM.git
