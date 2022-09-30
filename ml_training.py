@@ -6,7 +6,10 @@ from torch import optim
 import torchvision.utils
 import matplotlib.pyplot as plts
 from ASAM.asam import ASAM, SAM
-from Discriminative-learning-rates-PyTorch import discriminativeLR as dlr
+
+import importlib
+dlr = importlib.import_module("Discriminative-learning-rates-PyTorch","discriminativeLR")
+# from Discriminative-learning-rates-PyTorch import discriminativeLR as dlr
 
 class custom_warmup :
     #Adapted from yolov5 code
@@ -33,12 +36,12 @@ class custom_warmup :
 
 
 class trainer :
-    def __init(self, model, train_dataset, val_dataset, batch_size=16, val_dataset=None,
+    def __init__(self, model, train_dataset, val_dataset=None, batch_size=16,
     forward_function=None, val_function=None, report_function=None,
     optimizer='SGD', warmup_scheduler=None, warmup_epochs=5, accumulate_batches=1,
-    use_discriminativeLR=False, discriminativeLR=.0001
-    scheduler_names=[], scheduler_checkpoints=[]
-    SAM=False, ASAM=False, SWA=False, SWALR_epochs=5, SWA_lr=.05
+    use_discriminativeLR=False, discriminativeLR=.0001,
+    scheduler_names=[], scheduler_checkpoints=[],
+    SAM=False, ASAM=False, SWA=False, SWALR_epochs=5, SWA_lr=.05,
     lr=.01, momentum=0.937, scheduler_period=10,
     checkpoint_dir="training_checkpoints/") :
 
@@ -100,10 +103,10 @@ class trainer :
         optimizer_constructor=None
 
         if "Adam" in optimizer_name :
-            if optimizer_name is "Adam" :
+            if optimizer_name == "Adam" :
                 optimizer_constructor=torch.optim.Adam
 
-            elif optimizer_name is "AdamW" :
+            elif optimizer_name == "AdamW" :
                 optimizer_constructor=torch.optim.AdamW
 
             if self.SAM :
@@ -115,7 +118,7 @@ class trainer :
                 optimizer=optimizer_constructor(params, lr=lr, betas=(momentum, 0.999), weight_decay=self.decay)
         else :
 
-            if optimizer_name is "RMSProp" :
+            if optimizer_name == "RMSProp" :
                 optimizer_constructor=torch.optim.RMSProp
                 if self.SAM :
                     optimizer=SAM(params, optimizer_constructor, lr=lr, momentum=momentum, weight_decay=self.decay)
@@ -140,32 +143,31 @@ class trainer :
         # Scheduler checkpoints is the last step the associated scheduler should run at
         def create_scheduler(scheduler_name, num_steps, strategy="") :
             # TODO: update specific parameters, make them configurable
-                for i in num_steps :
-                    self.scheduler_list.append(scheduler_name)
+            for i in num_steps :
+                self.scheduler_list.append(scheduler_name)
 
-            if scheduler_name is "warmup" :
+            if scheduler_name == "warmup" :
                 return self.warmup_scheduler(optimizer, num_steps)
 
-            elif scheduler_name is "CosineAnnealingLR" :
+            elif scheduler_name == "CosineAnnealingLR" :
                 return torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=self.scheduler_period)
 
-            elif scheduler_name is "CosineAnnealingWarmRestarts" :
+            elif scheduler_name == "CosineAnnealingWarmRestarts" :
                 return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer, T_0=self.scheduler_period, T_mult=1, eta_min=0)
 
-            elif scheduler_name is "CyclicLR" :
-                if strategy is "" :
+            elif scheduler_name == "CyclicLR" :
+                if strategy == "" :
                     strategy="triangular"
                 return torch.optim.lr_scheduler.CyclicLR(self.optimizer, base_lr=self.lr, max_lr=0.1, step_size_up=5, mode=strategy, gamma=0.85)
 
-            elif scheduler_name is "OneCycleLR" :
+            elif scheduler_name == "OneCycleLR" :
                 return torch.optim.lr_scheduler.OneCycleLR(self.optimizer, max_lr=0.01, steps_per_epoch=len(data_loader), epochs=10)
 
-            elif scheduler_name is "ReduceLROnPlateau" :
+            elif scheduler_name == "ReduceLROnPlateau" :
                 return torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer)
 
-            elif scheduler_name is "SWA" :
-
-                return swa_scheduler=torch.optim.swa_utils.SWALR(optimizer, anneal_strategy=strategy, anneal_epochs=SWALR_epochs, swa_lr=self.SWA_lr)
+            elif scheduler_name == "SWA" :
+                return torch.optim.swa_utils.SWALR(optimizer, anneal_strategy=strategy, anneal_epochs=SWALR_epochs, swa_lr=self.SWA_lr)
 
         # create batch/epoch lookup
         schedulers=[]
@@ -268,7 +270,6 @@ class trainer :
             return running_loss/(i+1), 0
 
 
-
     #TODO make this better
     def epoch_end(self, epoch, train_loss, val_loss, acc=0) :
         if acc==0 :
@@ -276,12 +277,12 @@ class trainer :
         else :
             print("Epoch {}:\t train loss: {:.3f}\t val_loss:{:.3f} \t acc:{:.2f}".format(epoch, train_loss, val_loss, acc*100))
 
-
         if self.custom_report is not None :
             self.custom_report(epoch, train_loss, val_loss, acc)
 
     def train(self, epochs=10) :
             self.ASAM_flip_flop=1 #Set for ascent step
+            val_loss=0
 
             for epoch in epochs(self.last_epoch, epochs) :
                 self.last_epoch=epoch #for resuming
@@ -309,7 +310,6 @@ class trainer :
                             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
 
                         # Optimizer step
-
                         if self.SAM :
                             # self.optimizer.step(closure) #possibly depricated
                             optimizer.ascent_step() # contains zero_grad
@@ -328,13 +328,10 @@ class trainer :
 
 
                         self.scheduler_step(epoch, call_pos='accumulate')
-
                         last_opt_step = total_batches
 
                         #Do something with training loss
-
                         train_loss=0
-
 
                 ## End of Epoch ##
 
@@ -342,10 +339,8 @@ class trainer :
                 if self.validate :
                     val_loss, acc= self.val_function(self.model, self.val_loader, self.accuracy)
 
-
                 # Update scheduler
-                self.scheduler_step(epoch, call_pos='epoch', val_loss)
-
+                self.scheduler_step(epoch, call_pos='epoch', val_loss=val_loss)
 
                 with tune.checkpoint_dir(epoch) as checkpoint_dir:
                     path = os.path.join(checkpoint_dir, "checkpoint")
