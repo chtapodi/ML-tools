@@ -1,3 +1,6 @@
 [submodule "ASAM"]
 	path = ASAM
 	url = https://github.com/SamsungLabs/ASAM.git
+[submodule "Discriminative-learning-rates-PyTorch"]
+	path = Discriminative-learning-rates-PyTorch
+	url = https://github.com/vdouet/Discriminative-learning-rates-PyTorch.git
