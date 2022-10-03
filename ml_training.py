@@ -214,7 +214,6 @@ class trainer :
                 else :
                     return optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, **kwargs)
 
-
             elif scheduler_name == "SWA" :
                 if kwargs is None :
                     return optim.swa_utils.SWALR(self.optimizer, anneal_strategy="cos", anneal_epochs=self.SWALR_epochs, swa_lr=self.SWA_lr)
@@ -229,8 +228,6 @@ class trainer :
             # scheduler_steps.insert(0, self.warmup_batches)
             self.scheduler_checkpoints.append(self.warmup_batches)
 
-            print('warmup', self.warmup_batches)
-
         for scheduler_name, steps, kwargs in zip(scheduler_names, scheduler_steps, kwarg_list):
             schedulers.append(create_scheduler(scheduler_name, steps, kwargs))
             self.scheduler_checkpoints.append(self.scheduler_checkpoints[-1]+steps)
@@ -238,11 +235,9 @@ class trainer :
         if self.SWA :
             schedulers.append(create_scheduler('SWA', self.SWALR_epochs))
             self.scheduler_checkpoints.append(self.SWALR_epochs+self.scheduler_checkpoints[-1])
-            print('SWA', self.SWALR_epochs)
 
 
 
-        print(len(self.scheduler_list))
         if len(schedulers)==1 :
             return schedulers[0]
         else :
@@ -258,7 +253,7 @@ class trainer :
             # Schedulers that are called on a per batch basis
             if call_place=='batch' :
                 if curr_scheduler=="warmup" :
-                    self.scheduler.step(epoch)
+                    self.scheduler.step()
                 else :
                     print("Something is not right with scheduler setup")
                     print("{} stepped in {}".format(curr_scheduler, call_place))
@@ -266,9 +261,11 @@ class trainer :
             # Schedulers that are called on a per accumulate basis
             # https://discuss.pytorch.org/t/gradient-accumulation-and-scheduler/69077
             elif call_place=='accumulate' :
-                if curr_scheduler=="CosineAnnealingWarmRestarts" :
+                if curr_scheduler=="CosineAnnealingLR" :
                     self.scheduler.step()
 
+                elif curr_scheduler=="CosineAnnealingWarmRestarts" :
+                    self.scheduler.step()
                 elif curr_scheduler=="CyclicLR" :
                     self.scheduler.step()
 
