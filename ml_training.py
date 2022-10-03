@@ -51,13 +51,14 @@ class custom_warmup :
 
 class trainer :
     def __init__(self, model, train_dataset, val_dataset=None, batch_size=16,
-    forward_function=None, val_function=None, report_function=None,
-    optimizer='SGD', warmup_scheduler=None, warmup_epochs=5, accumulate_batches=1,
-    use_discriminativeLR=False, discriminativeLR=.0001,
-    scheduler_names=[], scheduler_checkpoints=[],
-    SAM=False, ASAM=False, SWA=False, SWALR_epochs=5, SWA_lr=.05,
-    lr=.01, decay=0.0005, momentum=0.937, scheduler_period=10,
-    checkpoint_dir="training_checkpoints/") :
+        forward_function=None, val_function=None, report_function=None,
+        optimizer='SGD', warmup_scheduler=None, warmup_epochs=5, accumulate_batches=1,
+        use_discriminativeLR=False, discriminativeLR=.0001,
+        scheduler_names=[], scheduler_steps=[], scheduler_kwargs=None,
+        SAM=False, ASAM=False, SWA=False, SWALR_epochs=5, SWA_lr=.05,
+        lr=.01, decay=0.0005, momentum=0.937, scheduler_period=10,
+        checkpoint_dir="training_checkpoints/") :
+        print("initch",scheduler_steps)
 
         # Scalers
         self.lr=lr
@@ -66,7 +67,6 @@ class trainer :
 
         self.SAM=SAM
 
-        print(self.SAM)
         self.ASAM=ASAM
         if self.ASAM and self.SAM :
             printf("SAM and ASAM cannot be enabled at the same time")
@@ -107,12 +107,16 @@ class trainer :
         if self.warmup_scheduler is None :
             self.warmup_scheduler=custom_warmup
 
+        if scheduler_kwargs is None :
+            scheduler_kwargs=[None for i in range(len(scheduler_names))]
 
-
-
+        if len(scheduler_steps)!=len(scheduler_names) or len(scheduler_kwargs)!=len(scheduler_names):
+            print("Number of schedulers and number of scheduler durations do not match")
+            exit()
         self.scheduler_list=[]
+        self.scheduler_checkpoints=[]
         self.scheduler_period=scheduler_period #for cosine schedulers
-        self.scheduler=self.generate_scheduler(scheduler_names, scheduler_checkpoints)
+        self.scheduler=self.generate_scheduler(scheduler_names, scheduler_steps, scheduler_kwargs)
 
 
         self.forward_function=forward_function
@@ -163,62 +167,87 @@ class trainer :
 
         return optimizer
 
-    def generate_scheduler(self, scheduler_names, scheduler_checkpoints) :
+    def generate_scheduler(self, scheduler_names, scheduler_steps, kwarg_list) :
         # https://www.kaggle.com/code/isbhargav/guide-to-pytorch-learning-rate-scheduling/notebook
         # Scheduler checkpoints is the last step the associated scheduler should run at
         schedulers=[]
+        self.scheduler_checkpoints=[]
 
-        def create_scheduler(scheduler_name, num_steps, strategy="") :
+        def create_scheduler(scheduler_name, num_steps, kwargs=None) :
             # TODO: update specific parameters, make them configurable
             for i in range(num_steps) :
                 self.scheduler_list.append(scheduler_name)
 
             if scheduler_name == "warmup" :
-                return self.warmup_scheduler(self.optimizer, num_steps)
+                if kwargs is None :
+                    return self.warmup_scheduler(self.optimizer, num_steps)
+                else :
+                    return self.warmup_scheduler(self.optimizer, **kwargs)
 
             elif scheduler_name == "CosineAnnealingLR" :
-                return optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=self.scheduler_period)
+                if kwargs is None :
+                    return optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=self.scheduler_period)
+                else :
+                    return optim.lr_scheduler.CosineAnnealingLR(self.optimizer, **kwargs)
 
             elif scheduler_name == "CosineAnnealingWarmRestarts" :
-                return optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer, T_0=self.scheduler_period, T_mult=1, eta_min=0)
+                if kwargs is None :
+                    return optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer, T_0=self.scheduler_period, T_mult=1, eta_min=0)
+                else :
+                    return optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer, **kwargs)
 
             elif scheduler_name == "CyclicLR" :
-                if strategy == "" :
-                    strategy="triangular"
-                return optim.lr_scheduler.CyclicLR(self.optimizer, base_lr=self.lr, max_lr=0.1, step_size_up=5, mode=strategy, gamma=0.85)
+                if kwargs is None :
+                    return optim.lr_scheduler.CyclicLR(self.optimizer, base_lr=self.lr, max_lr=0.1, step_size_up=5, mode="triangular2", gamma=0.85)
+                else :
+                    return optim.lr_scheduler.CyclicLR(self.optimizer, **kwargs)
 
             elif scheduler_name == "OneCycleLR" :
-                return optim.lr_scheduler.OneCycleLR(self.optimizer, max_lr=0.01, steps_per_epoch=len(data_loader), epochs=10)
+                if kwargs is None :
+                    return optim.lr_scheduler.OneCycleLR(self.optimizer, max_lr=.1, total_steps=num_steps)
+                else :
+                    return optim.lr_scheduler.OneCycleLR(self.optimizer, **kwargs)
 
             elif scheduler_name == "ReduceLROnPlateau" :
-                return optim.lr_scheduler.ReduceLROnPlateau(self.optimizer)
+                if kwargs is None :
+                    return optim.lr_scheduler.ReduceLROnPlateau(self.optimizer)
+                else :
+                    return optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, **kwargs)
+
 
             elif scheduler_name == "SWA" :
-                return optim.swa_utils.SWALR(optimizer, anneal_strategy=strategy, anneal_epochs=SWALR_epochs, swa_lr=self.SWA_lr)
+                if kwargs is None :
+                    return optim.swa_utils.SWALR(self.optimizer, anneal_strategy="cos", anneal_epochs=self.SWALR_epochs, swa_lr=self.SWA_lr)
+                else :
+                    return optim.swa_utils.SWALR(self.optimizer, anneal_epochs=self.SWALR_epochs, swa_lr=self.SWA_lr, **kwargs)
 
         # create batch/epoch lookup
 
         # Warmup
         if self.warmup_batches>0 :
             schedulers.append(create_scheduler('warmup', self.warmup_batches))
-            scheduler_checkpoints.insert(0, self.warmup_batches)
+            # scheduler_steps.insert(0, self.warmup_batches)
+            self.scheduler_checkpoints.append(self.warmup_batches)
 
-        for scheduler_name, checkpoint in zip(scheduler_names, scheduler_checkpoints):
-            schedulers.append(create_scheduler(scheduler_name, checkpoint-scheduler_checkpoints[-1]))
+            print('warmup', self.warmup_batches)
+
+        for scheduler_name, steps, kwargs in zip(scheduler_names, scheduler_steps, kwarg_list):
+            schedulers.append(create_scheduler(scheduler_name, steps, kwargs))
+            self.scheduler_checkpoints.append(self.scheduler_checkpoints[-1]+steps)
 
         if self.SWA :
-            schedulers.append(create_scheduler('SWA', self.SWALR_epochs+scheduler_checkpoints[-1]))
-            scheduler_checkpoints.append(self.SWALR_epochs+scheduler_checkpoints[-1])
+            schedulers.append(create_scheduler('SWA', self.SWALR_epochs))
+            self.scheduler_checkpoints.append(self.SWALR_epochs+self.scheduler_checkpoints[-1])
+            print('SWA', self.SWALR_epochs)
+
 
 
         print(len(self.scheduler_list))
         if len(schedulers)==1 :
             return schedulers[0]
         else :
-            del scheduler_checkpoints[-1] # Does not want the last checkpoint
-            print(schedulers)
-            print(scheduler_checkpoints)
-            return optim.lr_scheduler.SequentialLR(self.optimizer, schedulers, scheduler_checkpoints)
+            # del self.scheduler_checkpoints[-1] # Does not want the last checkpoint
+            return optim.lr_scheduler.SequentialLR(self.optimizer, schedulers, self.scheduler_checkpoints[:-1])
 
 
 
