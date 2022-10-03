@@ -4,35 +4,49 @@ from torchvision import transforms
 from torch import nn
 from torch import optim
 import torchvision.utils
-import matplotlib.pyplot as plts
+# import matplotlib.pyplot as plt
 from ASAM.asam import ASAM, SAM
 
 import importlib
-dlr = importlib.import_module("Discriminative-learning-rates-PyTorch","discriminativeLR")
+# dlr = importlib.import_module("Discriminative-learning-rates-PyTorch.discriminativeLR")
+
+
+
 # from Discriminative-learning-rates-PyTorch import discriminativeLR as dlr
 
 class custom_warmup :
-    #Adapted from yolov5 code
-    def __init__(self, optimizer, num_warmup, lr=.01, warmup_bias_lr=.1, momentum=0.937, warmup_momentum=0.8) :
+    def __init__(self, optimizer, num_warmup, lr=.01, lrf=.1, warmup_bias_lr=.1, momentum=0.937, warmup_momentum=0.8) :
         self.optimizer=optimizer
         self.num_warmup=num_warmup
         self.warmup_bias_lr=warmup_bias_lr
         self.momentum=momentum
         self.warmup_momentum=warmup_momentum
-
+        self.last_lr=self.warmup_bias_lr
         self.batches=0
-        self.lf=  lambda x: (1 - x / epochs) * (1.0 - hyp['lrf']) + hyp['lrf']  # linear
+        self.lr=lr
+        self.lf=lambda x: (1 - x / self.total_epochs) * (1.0 - lrf) + lrf  # linear
 
-    def step(self, epoch) :
+    def step(self) :
         self.batches+=1
-        xi = [0, nw]  # x interp
+        xi=[0, self.num_warmup]
         # accumulate = max(1, np.interp(ni, xi, [1, nbs / batch_size]).round())
+        bias_lr=np.interp(self.batches, xi, [self.warmup_bias_lr, self.lr])
+        lr=np.interp(self.batches, xi, [0.0, self.lr])
+        self.last_lr=lr
+        momentum=np.interp(self.batches, xi, [self.warmup_momentum, self.momentum])
+
         for j, x in enumerate(self.optimizer.param_groups):
             # bias lr falls from 0.1 to lr0, all other lrs rise from 0.0 to lr0
-            x['lr'] = np.interp(self.batches, xi, [self.warmup_bias_lr if j == 0 else 0.0, x['initial_lr'] * self.lf(epoch)])
-            if 'momentum' in x:
-                x['momentum'] = np.interp(self.batches, xi, [self.warmup_momentum, self.momentum])
+            if j==0 :
+                x['lr']=bias_lr
+            else :
+                x['lr'] = lr
 
+            if 'momentum' in x:
+                x['momentum'] = momentum
+
+    def get_last_lr(self) :
+        return self.last_lr
 
 
 class trainer :
@@ -42,28 +56,45 @@ class trainer :
     use_discriminativeLR=False, discriminativeLR=.0001,
     scheduler_names=[], scheduler_checkpoints=[],
     SAM=False, ASAM=False, SWA=False, SWALR_epochs=5, SWA_lr=.05,
-    lr=.01, momentum=0.937, scheduler_period=10,
+    lr=.01, decay=0.0005, momentum=0.937, scheduler_period=10,
     checkpoint_dir="training_checkpoints/") :
 
         # Scalers
         self.lr=lr
         self.momentum=momentum
+        self.decay=decay
 
+        self.SAM=SAM
+
+        print(self.SAM)
+        self.ASAM=ASAM
+        if self.ASAM and self.SAM :
+            printf("SAM and ASAM cannot be enabled at the same time")
+            exit()
 
 
         self.model=model
 
-        if discriminativeLR :
-            params, lr_arr, _ = dlr.discriminative_lr_params(self.model, slice(min_lr, self.lr)) #slice(min_lr,max_lr)
-            for p in params :
-                p['lr']=(float)(p['lr'])
+        # if discriminativeLR :
+        #     params, lr_arr, _ = dlr.discriminative_lr_params(self.model, slice(min_lr, self.lr)) #slice(min_lr,max_lr)
+        #     for p in params :
+        #         p['lr']=(float)(p['lr'])
 
         #init dataloaders
-        self.train_loader=torch.utils.data.DataLoader(train_dataset)
-        self.val_loader=torch.utils.data.DataLoader(val_dataset)
+        self.train_loader=DataLoader(train_dataset)
+        self.val_loader=DataLoader(val_dataset)
 
         self.batches_per_epoch=len(self.train_loader)
         self.accumulate_batches=accumulate_batches
+
+        self.SWA=SWA
+        self.SWALR_epochs=SWALR_epochs
+        self.SWA_lr=SWA_lr
+        if self.SWA :
+            self.swa_model = optim.swa_utils.AveragedModel(self.model)
+
+
+
 
         self.optimizer=optimizer
         if isinstance(self.optimizer, str): #If optimizer name passed in, generate optimizer
@@ -78,14 +109,8 @@ class trainer :
 
 
 
-        self.SWA=SWA
-        self.SWALR_epochs=SWALR_epochs
-        self.SWA_lr=SWA_lr
-        if self.SWA :
-            self.swa_model = torch.optim.swa_utils.AveragedModel(self.model)
 
-
-
+        self.scheduler_list=[]
         self.scheduler_period=scheduler_period #for cosine schedulers
         self.scheduler=self.generate_scheduler(scheduler_names, scheduler_checkpoints)
 
@@ -104,10 +129,10 @@ class trainer :
 
         if "Adam" in optimizer_name :
             if optimizer_name == "Adam" :
-                optimizer_constructor=torch.optim.Adam
+                optimizer_constructor=optim.Adam
 
             elif optimizer_name == "AdamW" :
-                optimizer_constructor=torch.optim.AdamW
+                optimizer_constructor=optim.AdamW
 
             if self.SAM :
                 optimizer=SAM(params, optimizer_constructor, lr=lr, betas=(momentum, 0.999), weight_decay=self.decay)
@@ -119,7 +144,7 @@ class trainer :
         else :
 
             if optimizer_name == "RMSProp" :
-                optimizer_constructor=torch.optim.RMSProp
+                optimizer_constructor=optim.RMSProp
                 if self.SAM :
                     optimizer=SAM(params, optimizer_constructor, lr=lr, momentum=momentum, weight_decay=self.decay)
                 elif self.ASAM :
@@ -128,7 +153,7 @@ class trainer :
                     optimizer=optimizer_constructor(params, lr=lr, momentum=momentum, weight_decay=self.decay)
 
             else :
-                optimizer_constructor=torch.optim.SGD #Default option
+                optimizer_constructor=optim.SGD #Default option
                 if self.SAM :
                     optimizer=SAM(params, optimizer_constructor, lr=lr, momentum=momentum, nesterov=True, weight_decay=self.decay)
                 elif self.ASAM :
@@ -141,36 +166,37 @@ class trainer :
     def generate_scheduler(self, scheduler_names, scheduler_checkpoints) :
         # https://www.kaggle.com/code/isbhargav/guide-to-pytorch-learning-rate-scheduling/notebook
         # Scheduler checkpoints is the last step the associated scheduler should run at
+        schedulers=[]
+
         def create_scheduler(scheduler_name, num_steps, strategy="") :
             # TODO: update specific parameters, make them configurable
-            for i in num_steps :
+            for i in range(num_steps) :
                 self.scheduler_list.append(scheduler_name)
 
             if scheduler_name == "warmup" :
-                return self.warmup_scheduler(optimizer, num_steps)
+                return self.warmup_scheduler(self.optimizer, num_steps)
 
             elif scheduler_name == "CosineAnnealingLR" :
-                return torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=self.scheduler_period)
+                return optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=self.scheduler_period)
 
             elif scheduler_name == "CosineAnnealingWarmRestarts" :
-                return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer, T_0=self.scheduler_period, T_mult=1, eta_min=0)
+                return optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer, T_0=self.scheduler_period, T_mult=1, eta_min=0)
 
             elif scheduler_name == "CyclicLR" :
                 if strategy == "" :
                     strategy="triangular"
-                return torch.optim.lr_scheduler.CyclicLR(self.optimizer, base_lr=self.lr, max_lr=0.1, step_size_up=5, mode=strategy, gamma=0.85)
+                return optim.lr_scheduler.CyclicLR(self.optimizer, base_lr=self.lr, max_lr=0.1, step_size_up=5, mode=strategy, gamma=0.85)
 
             elif scheduler_name == "OneCycleLR" :
-                return torch.optim.lr_scheduler.OneCycleLR(self.optimizer, max_lr=0.01, steps_per_epoch=len(data_loader), epochs=10)
+                return optim.lr_scheduler.OneCycleLR(self.optimizer, max_lr=0.01, steps_per_epoch=len(data_loader), epochs=10)
 
             elif scheduler_name == "ReduceLROnPlateau" :
-                return torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer)
+                return optim.lr_scheduler.ReduceLROnPlateau(self.optimizer)
 
             elif scheduler_name == "SWA" :
-                return torch.optim.swa_utils.SWALR(optimizer, anneal_strategy=strategy, anneal_epochs=SWALR_epochs, swa_lr=self.SWA_lr)
+                return optim.swa_utils.SWALR(optimizer, anneal_strategy=strategy, anneal_epochs=SWALR_epochs, swa_lr=self.SWA_lr)
 
         # create batch/epoch lookup
-        schedulers=[]
 
         # Warmup
         if self.warmup_batches>0 :
@@ -181,12 +207,22 @@ class trainer :
             schedulers.append(create_scheduler(scheduler_name, checkpoint-scheduler_checkpoints[-1]))
 
         if self.SWA :
-            schedulers.append(create_scheduler('SWA', checkpoint+scheduler_checkpoints[-1]))
-            scheduler_checkpoints.append(self.SWALR_epochs)
+            schedulers.append(create_scheduler('SWA', self.SWALR_epochs+scheduler_checkpoints[-1]))
+            scheduler_checkpoints.append(self.SWALR_epochs+scheduler_checkpoints[-1])
 
-        self.scheduler=torch.optim.lr_scheduler.SequentialLR(self.optimizer, schedulers, scheduler_checkpoints)
 
-        # Wraps and handles the sequential scheduler to ensure it is being called at the correct locale
+        print(len(self.scheduler_list))
+        if len(schedulers)==1 :
+            return schedulers[0]
+        else :
+            del scheduler_checkpoints[-1] # Does not want the last checkpoint
+            print(schedulers)
+            print(scheduler_checkpoints)
+            return optim.lr_scheduler.SequentialLR(self.optimizer, schedulers, scheduler_checkpoints)
+
+
+
+    # Wraps and handles the sequential scheduler to ensure it is being called at the correct locale
     def scheduler_step(self, epoch, call_place='epoch', val_loss=None) :
             curr_scheduler=self.scheduler_list[epoch]
 
