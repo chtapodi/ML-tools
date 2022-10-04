@@ -2,6 +2,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from torch import nn
+import torch
 from torch import optim
 import torchvision.utils
 # import matplotlib.pyplot as plt
@@ -50,15 +51,21 @@ class custom_warmup :
 
 
 class trainer :
-    def __init__(self, model, train_dataset, val_dataset=None, batch_size=16,
-        forward_function=None, val_function=None, report_function=None,
+    def __init__(self, model, train_dataset, val_dataset=None,
+        loader_kwargs=None, loader_workers=4, batch_size=16, shuffle_loader=True,
+        forward_function=None, backward_function=None, clip_grad_norm=True,
+        val_function=None, report_function=None, criterion=None,
         optimizer='SGD', warmup_scheduler=None, warmup_epochs=5, accumulate_batches=1,
-        use_discriminativeLR=False, discriminativeLR=.0001,
+        use_discriminativeLR=False, discriminativeLR=.0001, forward_model=None,
         scheduler_names=[], scheduler_steps=[], scheduler_kwargs=None,
         SAM=False, ASAM=False, SWA=False, SWALR_epochs=5, SWA_lr=.05,
         lr=.01, decay=0.0005, momentum=0.937, scheduler_period=10,
-        checkpoint_dir="training_checkpoints/") :
+        device=None, checkpoint_dir="training_checkpoints/") :
         print("initch",scheduler_steps)
+
+        self.device=device
+        if self.device is None :
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         # Scalers
         self.lr=lr
@@ -74,17 +81,26 @@ class trainer :
 
 
         self.model=model
+        self.model.to(self.device)
+
+        self.criterion=criterion
+        if self.criterion is None :
+            self.criterion=torch.nn.MSELoss()
 
         # if discriminativeLR :
         #     params, lr_arr, _ = dlr.discriminative_lr_params(self.model, slice(min_lr, self.lr)) #slice(min_lr,max_lr)
         #     for p in params :
         #         p['lr']=(float)(p['lr'])
 
-        #init dataloaders
-        self.train_loader=DataLoader(train_dataset)
-        self.val_loader=DataLoader(val_dataset)
+        self.loader_kwargs=loader_kwargs
+        self.loader_workers=loader_workers
+        self.train_dataset=train_dataset
+        self.val_dataset=val_dataset
+        self.batch_size=batch_size
+        self.shuffle_loader=shuffle_loader
+        self.clip_grad_norm=clip_grad_norm
 
-        self.batches_per_epoch=len(self.train_loader)
+        self.batches_per_epoch=len(self.train_dataset)
         self.accumulate_batches=accumulate_batches
 
         self.SWA=SWA
@@ -92,9 +108,6 @@ class trainer :
         self.SWA_lr=SWA_lr
         if self.SWA :
             self.swa_model = optim.swa_utils.AveragedModel(self.model)
-
-
-
 
         self.optimizer=optimizer
         if isinstance(self.optimizer, str): #If optimizer name passed in, generate optimizer
@@ -119,9 +132,18 @@ class trainer :
         self.scheduler=self.generate_scheduler(scheduler_names, scheduler_steps, scheduler_kwargs)
 
 
-        self.forward_function=forward_function
+        self.forward_model =forward_model
+        if self.forward_model is None :
+            self.forward_model=self.standard_forward
+
+        self.backward=backward_function
+        if self.backward is None :
+            self.backward=self.standard_backward
 
         self.val_function=val_function
+
+
+        self.last_epoch=0
 
 
     def generate_optimizer(self, optimizer_name, momentum) :
@@ -248,8 +270,6 @@ class trainer :
             # del self.scheduler_checkpoints[-1] # Does not want the last checkpoint
             return optim.lr_scheduler.SequentialLR(self.optimizer, schedulers, self.scheduler_checkpoints[:-1])
 
-
-
     # Wraps and handles the sequential scheduler to ensure it is being called at the correct locale
     def scheduler_step(self, epoch, call_place='epoch', val_loss=None) :
             curr_scheduler=self.scheduler_list[epoch]
@@ -258,9 +278,9 @@ class trainer :
             if call_place=='batch' :
                 if curr_scheduler=="warmup" :
                     self.scheduler.step()
-                else :
-                    print("Something is not right with scheduler setup")
-                    print("{} stepped in {}".format(curr_scheduler, call_place))
+                # else :
+                #     print("Something is not right with scheduler setup")
+                #     print("{} stepped in {}".format(curr_scheduler, call_place))
 
             # Schedulers that are called on a per accumulate basis
             # https://discuss.pytorch.org/t/gradient-accumulation-and-scheduler/69077
@@ -278,9 +298,9 @@ class trainer :
 
                 elif curr_scheduler=="batch" : # Catch all for other batch updating schedulers
                     self.scheduler.step()
-                else :
-                    print("Something is not right with scheduler setup")
-                    print("{} stepped in {}".format(curr_scheduler, call_place))
+                # else :
+                #     print("Something is not right with scheduler setup")
+                #     print("{} stepped in {}".format(curr_scheduler, call_place))
 
             # Schedulers that are called once per epoch
             elif call_place=='epoch' :
@@ -293,19 +313,21 @@ class trainer :
 
                 elif curr_scheduler=="epoch" : # Catch all for other epoch updating schedulers
                     self.scheduler.step()
-                else :
-                    print("Something is not right with scheduler setup")
-                    print("{} stepped in {}".format(curr_scheduler, call_place))
+                # else :
+                #     print("Something is not right with scheduler setup")
+                #     print("{} stepped in {}".format(curr_scheduler, call_place))
 
     # This is just a normal forward pass, but it is split out to allow for the generalizability of the code and custom functions to be passed in
     def standard_forward(self, model, data) :
         input, values=data
         input, values=input.to(self.device), values.to(self.device)
-
         output=self.model(input)
 
         loss=self.criterion(output, values)
         return loss
+
+    def standard_backward(self, loss) :
+        loss.backward()
 
 
     def validate(self, model, dataloader, get_accuracy=False) :
@@ -349,31 +371,44 @@ class trainer :
     def train(self, epochs=10) :
             self.ASAM_flip_flop=1 #Set for ascent step
             val_loss=0
+            last_opt_step=0
 
-            for epoch in epochs(self.last_epoch, epochs) :
+            for epoch in range(self.last_epoch, epochs) :
+                #init dataloaders
+                if self.loader_kwargs is not None :
+                    self.train_loader=torch.utils.data.DataLoader(self.train_dataset, **self.loader_kwargs)
+                    self.val_loader=torch.utils.data.DataLoader(self.val_dataset, **self.loader_kwargs)
+                else :
+                    self.train_loader=torch.utils.data.DataLoader(self.train_dataset, batch_size=self.batch_size, num_workers=self.loader_workers, shuffle=self.shuffle_loader)
+                    self.val_loader=torch.utils.data.DataLoader(self.val_dataset, batch_size=self.batch_size, num_workers=self.loader_workers, shuffle=self.shuffle_loader)
+
+
                 self.last_epoch=epoch #for resuming
-
+                i=0
                 for i, data in enumerate(self.train_loader, 0):
+                # for data in self.train_loader:
+                    i+=1
+
 
                     total_batches= i + self.batches_per_epoch*epoch
 
                     # Train
                     train_loss=self.forward_model(self.model, data)
 
-                    train_loss.backwards()
+                    self.backward(train_loss)
 
                     if self.ASAM_flip_flop : #If ASAM, only counts loss from before ascent step. else, always counts loss
                         train_loss+=train_loss.item()
 
                     # Warmup and per batch schedulers
-                    self.scheduler_step(epoch, call_pos='batch')
+                    self.scheduler_step(epoch, call_place='batch')
 
 
                     #Step optimizer
                     if total_batches - last_opt_step >= self.accumulate_batches:
 
                         if self.clip_grad_norm :
-                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10.0)
 
                         # Optimizer step
                         if self.SAM :
@@ -390,10 +425,10 @@ class trainer :
 
                         else :
                             self.optimizer.step()
-                            optimizer.zero_grad()
+                            self.optimizer.zero_grad()
 
 
-                        self.scheduler_step(epoch, call_pos='accumulate')
+                        self.scheduler_step(epoch, call_place='accumulate')
                         last_opt_step = total_batches
 
                         #Do something with training loss
@@ -402,12 +437,12 @@ class trainer :
                 ## End of Epoch ##
 
                 # Validate
-                if self.validate :
-                    val_loss, acc= self.val_function(self.model, self.val_loader, self.accuracy)
+                # if self.validate :
+                #     val_loss, acc= self.val_function(self.model, self.val_loader, self.accuracy)
 
                 # Update scheduler
-                self.scheduler_step(epoch, call_pos='epoch', val_loss=val_loss)
-
-                with tune.checkpoint_dir(epoch) as checkpoint_dir:
-                    path = os.path.join(checkpoint_dir, "checkpoint")
-                    torch.save((model.state_dict(), optimizer.state_dict()), path)
+                self.scheduler_step(epoch, call_place='epoch', val_loss=val_loss)
+                # 
+                # with tune.checkpoint_dir(epoch) as checkpoint_dir:
+                #     path = os.path.join(checkpoint_dir, "checkpoint")
+                #     torch.save((model.state_dict(), optimizer.state_dict()), path)
