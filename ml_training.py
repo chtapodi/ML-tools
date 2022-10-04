@@ -230,7 +230,11 @@ class trainer :
 
         for scheduler_name, steps, kwargs in zip(scheduler_names, scheduler_steps, kwarg_list):
             schedulers.append(create_scheduler(scheduler_name, steps, kwargs))
-            self.scheduler_checkpoints.append(self.scheduler_checkpoints[-1]+steps)
+            if len(self.scheduler_checkpoints)>=1 :
+                self.scheduler_checkpoints.append(self.scheduler_checkpoints[-1]+steps)
+            else :
+                self.scheduler_checkpoints.append(steps)
+
 
         if self.SWA :
             schedulers.append(create_scheduler('SWA', self.SWALR_epochs))
